@@ -1,0 +1,52 @@
+#!/bin/bash
+# Add the hbnlmeans filter to an FFmpeg source tree (FFmpeg 8.0 or newer).
+#   ./add-to-ffmpeg.run /path/to/ffmpeg
+# Then configure FFmpeg with:  --enable-gpl --enable-libhbnlmeans
+# Safe to run twice: lines already there are not added again.
+
+set -e
+
+here="$(cd "$(dirname "$0")" && pwd)"
+ff="${1:-.}"
+
+if [ ! -f "$ff/configure" ] || [ ! -f "$ff/libavfilter/allfilters.c" ]; then
+    echo "add-to-ffmpeg: $ff is not an FFmpeg source tree" >&2
+    exit 1
+fi
+if ! grep -q '^extern const FFFilter ' "$ff/libavfilter/allfilters.c"; then
+    echo "add-to-ffmpeg: this FFmpeg is older than 8.0 (no FFFilter); not supported" >&2
+    exit 1
+fi
+
+cp "$here/vf_hbnlmeans.c" "$ff/libavfilter/vf_hbnlmeans.c"
+
+# add_after FILE ANCHOR LINE: put LINE after the first line matching the
+# regex ANCHOR, unless LINE is already in FILE.
+add_after() {
+    local file="$1"
+    if grep -qxF -- "$3" "$file"; then return 0; fi
+    ANCHOR="$2" LINE="$3" awk '
+        { print }
+        !done && $0 ~ ENVIRON["ANCHOR"] { print ENVIRON["LINE"]; done = 1 }
+    ' "$file" > "$file.hbnlm.tmp"
+    if ! grep -qxF -- "$3" "$file.hbnlm.tmp"; then
+        rm -f "$file.hbnlm.tmp"
+        echo "add-to-ffmpeg: anchor not found in $file: $2" >&2
+        exit 1
+    fi
+    cat "$file.hbnlm.tmp" > "$file"   # keeps the file's mode (configure stays executable)
+    rm -f "$file.hbnlm.tmp"
+}
+
+af="$ff/libavfilter/allfilters.c"
+mk="$ff/libavfilter/Makefile"
+cf="$ff/configure"
+
+add_after "$af" '^extern const FFFilter ff_vf_hflip;'          'extern const FFFilter ff_vf_hbnlmeans;'
+add_after "$mk" '^OBJS-[$][(]CONFIG_HFLIP_FILTER[)] '          'OBJS-$(CONFIG_HBNLMEANS_FILTER)              += vf_hbnlmeans.o'
+add_after "$cf" '^    libvidstab$'                             '    libhbnlmeans'
+add_after "$cf" '^  --enable-libvidstab '                      '  --enable-libhbnlmeans    enable HandBrake NLMeans denoiser via libhbnlmeans [no]'
+add_after "$cf" '^vidstabdetect_filter_deps="libvidstab"$'     'hbnlmeans_filter_deps="libhbnlmeans"'
+add_after "$cf" '^enabled libvidstab '                         'enabled libhbnlmeans      && require_pkg_config libhbnlmeans "hbnlmeans >= 1.0.0" hbnlmeans.h hbnlm_create'
+
+echo "hbnlmeans added to $ff; configure with --enable-gpl --enable-libhbnlmeans"

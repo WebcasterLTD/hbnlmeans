@@ -1,0 +1,7 @@
+*.o
+*.a
+*.so
+*.so.*
+hbnlmeans.pc
+test/selftest
+test/work/

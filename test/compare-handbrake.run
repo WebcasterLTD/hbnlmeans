@@ -1,0 +1,60 @@
+#!/bin/bash
+# Check ffmpeg's hbnlmeans against HandBrake's own NLMeans code, frame by frame.
+#   test/compare-handbrake.run [ffmpeg] [video]
+# Downloads HandBrake's libhb sources (git), builds a reference program from
+# them unmodified, runs both on a few seconds of the video and compares bytes.
+# Without a video, a noisy test pattern is used.
+
+set -e
+FF="${1:-ffmpeg}"
+VIDEO="$2"
+here="$(cd "$(dirname "$0")" && pwd)"
+W="$here/work"
+mkdir -p "$W"
+cd "$W"
+
+if [ ! -d hb/libhb ]; then
+    git clone --depth 1 --filter=blob:none --sparse https://github.com/HandBrake/HandBrake.git hb
+    git -C hb sparse-checkout set libhb
+fi
+echo "HandBrake $(git -C hb log -1 --format='%h %cd' --date=short)"
+python3 -I "$here/handbrake/gen_harness.py" hb/libhb > harness.c
+cp "$here/handbrake/harness_main.c" .
+cc -O2 -std=gnu11 -I. -Ihb/libhb -o harness harness.c -lm
+
+if [ -n "$VIDEO" ]; then
+    SRC=(-ss 60 -i "$VIDEO")
+else
+    SRC=(-f lavfi -i "testsrc2=size=1920x1080:rate=24,noise=alls=12:allf=t")
+fi
+"$FF" -nostdin -hide_banner -loglevel error -y "${SRC[@]}" -frames:v 24 -an -sn -vf "scale=1920:1080,format=yuv420p"     -f rawvideo s8.yuv
+"$FF" -nostdin -hide_banner -loglevel error -y "${SRC[@]}" -frames:v 10 -an -sn -vf "scale=1917:1077,format=yuv420p"     -f rawvideo odd.yuv
+"$FF" -nostdin -hide_banner -loglevel error -y "${SRC[@]}" -frames:v 10 -an -sn -vf "scale=1920:1080,format=yuv420p10le" -f rawvideo s10.yuv
+
+fails=0
+# name | input | WxH | pix_fmt | depth | ffmpeg options | HandBrake settings (as HandBrake logs them) | env
+while IFS='|' read -r name in size fmt depth fopts hbset envv; do
+    [ -z "$name" ] && continue
+    env $envv DEPTH=$depth ./harness ${size%x*} ${size#*x} "$hbset" $in ref.yuv < /dev/null
+    "$FF" -nostdin -hide_banner -loglevel error -y -f rawvideo -pix_fmt $fmt -s $size -i $in -vf "hbnlmeans=$fopts" -f rawvideo out.yuv
+    if cmp -s ref.yuv out.yuv; then r=IDENTICAL; else r=DIFFERENT; fails=$((fails+1)); fi
+    printf '%-22s %s\n' "$name" "$r"
+done <<'EOF'
+medium|s8.yuv|1920x1080|yuv420p|8|preset=medium|y-strength=6:y-origin-tune=1:y-patch-size=7:y-range=3:y-frame-count=2:y-prefilter=0:cb-strength=6:cb-origin-tune=1:cb-patch-size=7:cb-range=3:cb-frame-count=2:cb-prefilter=0|
+medium/film|s8.yuv|1920x1080|yuv420p|8|preset=medium:tune=film|y-strength=6:y-origin-tune=0.8:y-patch-size=7:y-range=3:y-frame-count=2:y-prefilter=0:cb-strength=8:cb-origin-tune=0.8:cb-patch-size=7:cb-range=3:cb-frame-count=2:cb-prefilter=0|
+light/grain|s8.yuv|1920x1080|yuv420p|8|preset=light:tune=grain|y-strength=0:y-origin-tune=0.9:y-patch-size=7:y-range=3:y-frame-count=2:y-prefilter=0:cb-strength=3.5:cb-origin-tune=0.9:cb-patch-size=7:cb-range=3:cb-frame-count=2:cb-prefilter=0|
+strong/highmotion|s8.yuv|1920x1080|yuv420p|8|preset=strong:tune=highmotion|y-strength=8:y-origin-tune=0.6:y-patch-size=7:y-range=3:y-frame-count=2:y-prefilter=0:cb-strength=6.75:cb-origin-tune=0.5:cb-patch-size=7:cb-range=5:cb-frame-count=1:cb-prefilter=0|
+strong/animation|s8.yuv|1920x1080|yuv420p|8|preset=strong:tune=animation|y-strength=10:y-origin-tune=0.15:y-patch-size=5:y-range=7:y-frame-count=4:y-prefilter=0:cb-strength=8:cb-origin-tune=0.15:cb-patch-size=5:cb-range=7:cb-frame-count=4:cb-prefilter=0|
+ultralight/tape|s8.yuv|1920x1080|yuv420p|8|preset=ultralight:tune=tape|y-strength=1.5:y-origin-tune=0.9:y-patch-size=3:y-range=5:y-frame-count=1:y-prefilter=0:cb-strength=5:cb-origin-tune=0.9:cb-patch-size=5:cb-range=5:cb-frame-count=1:cb-prefilter=0|
+strong/sprite|s8.yuv|1920x1080|yuv420p|8|preset=strong:tune=sprite|y-strength=3:y-origin-tune=0.15:y-patch-size=5:y-range=7:y-frame-count=2:y-prefilter=0:cb-strength=4:cb-origin-tune=0.5:cb-patch-size=5:cb-range=11:cb-frame-count=4:cb-prefilter=0|
+prefilter mean+edge|s8.yuv|1920x1080|yuv420p|8|y-strength=7:y-origin-tune=0.5:y-prefilter=1281:cb-strength=9:cb-prefilter=1026:cr-prefilter=0|y-strength=7:y-origin-tune=0.5:y-prefilter=1281:cb-strength=9:cb-prefilter=1026:cr-prefilter=0|PREFILTER_FIRST=1
+prefilter median|s8.yuv|1920x1080|yuv420p|8|y-prefilter=8:cb-prefilter=4:cr-prefilter=516:y-frame-count=3|y-prefilter=8:cb-prefilter=4:cr-prefilter=516:y-frame-count=3|PREFILTER_FIRST=1
+prefilter csm|s8.yuv|1920x1080|yuv420p|8|y-prefilter=32:cb-prefilter=16:cr-prefilter=2304:y-patch-size=9:y-range=5|y-prefilter=32:cb-prefilter=16:cr-prefilter=2304:y-patch-size=9:y-range=5|PREFILTER_FIRST=1
+passthru, big patch|s8.yuv|1920x1080|yuv420p|8|y-prefilter=2049:cb-strength=0:cr-strength=12:cr-patch-size=15:cr-range=11|y-prefilter=2049:cb-strength=0:cr-strength=12:cr-patch-size=15:cr-range=11|
+odd size 1917x1077|odd.yuv|1917x1077|yuv420p|8|preset=strong:tune=animation|y-strength=10:y-origin-tune=0.15:y-patch-size=5:y-range=7:y-frame-count=4:cb-strength=8:cb-origin-tune=0.15:cb-patch-size=5:cb-range=7:cb-frame-count=4|
+10-bit medium/film|s10.yuv|1920x1080|yuv420p10le|10|preset=medium:tune=film|y-strength=6:y-origin-tune=0.8:cb-strength=8:cb-origin-tune=0.8|
+10-bit strong/sprite|s10.yuv|1920x1080|yuv420p10le|10|preset=strong:tune=sprite|y-strength=3:y-origin-tune=0.15:y-patch-size=5:y-range=7:y-frame-count=2:cb-strength=4:cb-origin-tune=0.5:cb-patch-size=5:cb-range=11:cb-frame-count=4|
+EOF
+
+rm -f ref.yuv out.yuv
+if [ $fails = 0 ]; then echo "all identical"; else echo "$fails DIFFERENT"; exit 1; fi

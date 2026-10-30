@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=@INCDIR@
+
+Name: hbnlmeans
+Description: HandBrake's NLMeans denoiser as a standalone library
+Version: @VERSION@
+Libs: -L${libdir} -lhbnlmeans
+Libs.private: -lm
+Cflags: -I${includedir}
